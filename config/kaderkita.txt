@@ -1,0 +1,3 @@
+BASE=https://raw.githubusercontent.com/PATH-PHC-RGB-PHASE-2/AgentKit
+BRANCH=master
+PROJECT=Backend,CMS,Mobile
