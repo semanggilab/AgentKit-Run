@@ -48,6 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/semanggilab/AgentKit-Run/refs/heads
 
 | Perintah | Kegunaan |
 |---|---|
+| `init` | Menyiapkan checkout baru: membuat folder tiap proyek grup di folder induk, `git clone` sesuai bagian `[repo]` di `agentkit/projects/<PROJECT>.conf`, lalu `apply` di tiap folder. Tanpa PROJECT = seluruh grup (`run.sh webcore2 init`); `run.sh webcore2 init mpdn` = satu proyek. |
 | `build` | Membuat patch versi berikutnya dari satu checkout proyek ke `agentkit`. Hanya pemelihara, selalu lokal. |
 | `apply` | Memasang patch proyek yang dipilih sampai versi terbaru. |
 | `verify` | Memeriksa isi terhadap manifest, hook, exclusion lokal, dan skill. |
@@ -56,6 +57,40 @@ curl -fsSL https://raw.githubusercontent.com/semanggilab/AgentKit-Run/refs/heads
 
 Opsi penting: `--local`, `--dry-run`, `--overwrite`, `--note`, `--root`,
 `--target`, `--agentkit`, `--base-url`, dan `--branch`.
+
+## Perintah `init`
+
+```bash
+bash AgentKit-Run/run.sh webcore2 init            # semua proyek grup
+bash AgentKit-Run/run.sh webcore2 init mpdn       # satu proyek
+bash AgentKit-Run/run.sh webcore2 init --dry-run  # simulasi
+```
+
+Dari folder induk kosong, online: `curl -fsSL .../run.sh | bash -s -- webcore2 init`.
+Urutannya per proyek: ambil `projects/<PROJECT>.conf` dari repo data, buat `<root>/<PROJECT>`,
+`git clone` repo root (key `root`), `git clone` setiap repo anak (key lain), lalu `apply`. Folder yang sudah berisi repo Git tidak di-clone ulang (apply tetap
+dijalankan, jadi `init` aman diulang); folder yang ada, tidak kosong, dan bukan repo Git dilewati.
+Kegagalan satu proyek tidak menghentikan proyek lain; kode keluar 1 bila ada yang gagal.
+
+Daftar repo ada di bagian `[repo]` pada `agentkit/projects/<PROJECT>.conf`. Key `root` = repo root checkout;
+key lain = path relatif terhadap root checkout (boleh diberi tanda kutip), nilainya URL repo anak. Baris `#` dan kosong diabaikan:
+
+```ini
+[repo]
+root = https://gitlab.com/webcore2/main-prod.git
+"modules/mpdn" = https://gitlab.com/webcore2/app-mpdn.git
+"resources" = https://gitlab.com/webcore/res-clipone.git
+"resources/dore" = https://gitlab.com/webcore/res-dore.git
+```
+
+Induk di-clone lebih dulu dari anak (`resources` sebelum `resources/dore`, apa pun urutan barisnya). PATH yang
+absolut, memuat `..`, atau berkarakter aneh ditolak. Folder yang sudah repo Git dilewati; folder tidak kosong
+yang bukan repo Git dilaporkan gagal tanpa menghentikan repo lain. Tanpa key `root`, proyek dilaporkan gagal; tanpa repo anak, hanya
+repo root yang di-clone.
+
+URL tidak boleh memuat token/kredensial (ditolak). Clone memakai kredensial git yang ada
+(`glab auth login`, `gh auth login`, credential helper) tanpa prompt. Repo yang tidak tercantum di `[repo]`
+(mis. domain server) di-clone terpisah, mis. dengan `webcorecli`; setelah itu jalankan `verify`.
 
 ## Data privat dan token
 

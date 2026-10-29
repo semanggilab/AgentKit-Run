@@ -13,7 +13,11 @@
 #
 #   GROUP   : nama berkas config/<GROUP>.txt di repo agentkit-run
 #   PROJECT : salah satu nilai PROJECT pada konfigurasi grup
-#   COMMAND : build | apply | verify | status | help
+#   COMMAND : init | build | apply | verify | status | help
+#
+#   init (seluruh grup)  : ... <GROUP> init [PROJECT] [opsi]
+#                          membuat folder tiap proyek di <root>, git clone root (key root) dan repo anak (key lain)
+#                          dari bagian [repo] di projects/<PROJECT>.conf, lalu apply.
 #
 # Opsi:
 #   --root DIR       folder induk proyek dan repo data (default: dideteksi dari folder kerja)
@@ -30,7 +34,8 @@
 # Variabel lingkungan: AGENTKIT_TOKEN, GITLAB_TOKEN, CI_JOB_TOKEN, GITHUB_TOKEN, GH_TOKEN,
 # AGENTKIT_BASE_URL, AGENTKIT_RUN_URL, AGENTKIT_ROOT, AGENTKIT_SOURCE=local.
 #
-# Script ini tidak pernah menjalankan commit, push, atau fetch pada repo proyek.
+# Script ini tidak pernah menjalankan commit, push, atau fetch pada repo proyek. Satu-satunya
+# pengecualian adalah `init`, yang melakukan `git clone` ke folder proyek yang belum ada (atau kosong).
 # Perubahan di .git/ proyek hanya: hooks/ (lewat .agents/install-git-hooks.sh),
 # blok "# BEGIN agent-kit" di info/exclude, dan status/cadangan di <git-dir>/agent-kit/.
 # =============================================================================
@@ -293,12 +298,16 @@ ak_resolve_paths() {
 ak_check_target() {
   [ -d "$AK_TARGET" ] || ak_die "folder proyek tidak ditemukan: $AK_TARGET (pakai --target atau --root)"
   _missing=""
+  # Checkout yang baru di-clone oleh `init` hanya berisi repo framework (modul/domain di-clone terpisah),
+  # sehingga penanda modul belum ada; identitasnya sudah pasti karena folder dibuat untuk proyek ini.
+  if [ "${AK_SKIP_IDENTIFY:-0}" != 1 ]; then
   while IFS= read -r _f; do
     [ -z "$_f" ] && continue
     [ -e "$AK_TARGET/$_f" ] || _missing="$_missing $_f"
   done <<EOF
 $C_IDENTIFY
 EOF
+  fi
   [ -z "$_missing" ] || ak_die "$AK_TARGET tidak terlihat seperti repo $AK_PROJECT (tidak ada:$_missing)"
   AK_GITDIR="$(git -C "$AK_TARGET" rev-parse --absolute-git-dir 2>/dev/null)" \
     || ak_die "$AK_TARGET bukan repo Git"
@@ -666,6 +675,143 @@ ak_apply_overwrite() {   # $1=terpasang, $2=terbaru, $3=dry
   return 0
 }
 
+# ----------------------------------------------------------------- init
+ak_init_root() {   # folder induk untuk init (tanpa PROJECT)
+  if [ -z "$AK_ROOT" ]; then
+    _cwd="$(pwd -P)"
+    if [ -n "${AGENTKIT_ROOT:-}" ]; then AK_ROOT="$AGENTKIT_ROOT"
+    elif [ -d "$_cwd/agentkit" ] || [ -d "$_cwd/AgentKit" ] || [ -d "$_cwd/agentkit-run" ] || [ -d "$_cwd/AgentKit-Run" ]; then AK_ROOT="$_cwd"
+    else
+      case "$(basename "$_cwd")" in
+        agentkit|AgentKit|agentkit-run|AgentKit-Run) AK_ROOT="$(cd "$_cwd/.." && pwd -P)" ;;
+        *) AK_ROOT="$_cwd" ;;
+      esac
+    fi
+  fi
+  mkdir -p "$AK_ROOT" 2>/dev/null
+  AK_ROOT="$(cd "$AK_ROOT" 2>/dev/null && pwd -P)" || ak_die "folder induk tidak ditemukan: $AK_ROOT"
+  if [ -z "$AK_DIR" ]; then
+    if [ -d "$AK_ROOT/agentkit" ]; then AK_DIR="$AK_ROOT/agentkit"
+    elif [ -d "$AK_ROOT/AgentKit" ]; then AK_DIR="$AK_ROOT/AgentKit"
+    else AK_DIR="$AK_ROOT/agentkit"; fi
+  fi
+  [ -d "$AK_DIR" ] && AK_DIR="$(cd "$AK_DIR" && pwd -P)"
+  return 0
+}
+
+ak_url_ok() {   # $1=URL, $2=label; peringatan tanpa menampilkan isi URL bila ditolak
+  case "$1" in
+    https://*@*|http://*@*) ak_warn "URL untuk $2 memuat kredensial; hapus token dari URL (isi tidak ditampilkan)"; return 1 ;;
+    https://*|ssh://*|git@*|file://*) return 0 ;;
+    *) ak_warn "URL untuk $2 tidak dikenali (harus https://, ssh://, git@, atau file://)"; return 1 ;;
+  esac
+}
+
+# Clone $1=URL ke $2=folder. Kode: 0 = di-clone, 2 = sudah repo Git (dilewati), 1 = gagal.
+ak_clone_into() {
+  _cu="$1"; _cd="$2"; _cl="$3"
+  if [ -e "$_cd/.git" ]; then ak_say "  $_cl: sudah repo Git; clone dilewati"; return 2; fi
+  if [ -d "$_cd" ] && [ -n "$(ls -A "$_cd" 2>/dev/null)" ]; then
+    ak_warn "$_cl: $_cd sudah ada, tidak kosong, dan bukan repo Git; dilewati"; return 1
+  fi
+  if [ "$AK_DRY" = 1 ]; then ak_say "  [simulasi] $_cl: git clone $_cu -> $_cd"; return 0; fi
+  _cm=0; [ -d "$_cd" ] || { mkdir -p "$_cd" || { ak_warn "$_cl: tidak bisa membuat $_cd"; return 1; }; _cm=1; }
+  ak_say "  $_cl: git clone $_cu"
+  if ! env GIT_TERMINAL_PROMPT=0 git clone -- "$_cu" "$_cd" >/dev/null 2>"$AK_TMP/clone.err"; then
+    ak_warn "$_cl: clone gagal: $(tail -n 2 "$AK_TMP/clone.err" | tr '\n' ' ' | sed -E 's#(https?://)[^/@ ]*@#\1#g')"
+    [ "$_cm" = 1 ] && rmdir "$_cd" 2>/dev/null
+    return 1
+  fi
+  return 0
+}
+
+# Bagian [repo] di projects/<PROJECT>.conf: "root = URL" untuk repo root, "PATH = URL" untuk repo anak
+# (PATH relatif terhadap root checkout; boleh diberi tanda kutip). Baris # dan kosong diabaikan.
+ak_repo_entries() {   # $1=berkas conf -> "PATH<TAB>URL" per baris; root dicetak sebagai "."; induk lebih dulu dari anak
+  ak_conf_section "$1" repo | tr -d '\r' | awk '
+    { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "") }
+    /^(#|$)/ { next }
+    match($0, /=/) {
+      k = substr($0, 1, RSTART - 1); v = substr($0, RSTART + 1)
+      sub(/[[:space:]]+$/, "", k); sub(/^[[:space:]]+/, "", v)
+      if (k ~ /^".*"$/ || k ~ /^\x27.*\x27$/) k = substr(k, 2, length(k) - 2)
+      if (v ~ /^".*"$/ || v ~ /^\x27.*\x27$/) v = substr(v, 2, length(v) - 2)
+      if (tolower(k) == "root") k = "."
+      if (k != "" && v != "") printf "%d\t%s\t%s\n", gsub(/\//, "/", k), k, v }' \
+    | LC_ALL=C sort -s -n -k1,1 | cut -f2-
+}
+
+ak_cmd_init() {
+  ak_init_root
+  command -v git >/dev/null 2>&1 || ak_die "git tidak ditemukan"
+  if [ -n "$AK_PROJECT" ]; then _list="$AK_PROJECT"; else _list="$(printf '%s' "$AK_GROUP_PROJECTS" | tr ',' ' ')"; fi
+  ak_say "Init grup $AK_GROUP di $AK_ROOT$( [ "$AK_DRY" = 1 ] && echo ' [SIMULASI]')"
+  _done=""; _failed=""
+  for _p in $_list; do
+    AK_PROJECT="$_p"; AK_TARGET="$AK_ROOT/$_p"; AK_CONF=""; AK_GITDIR=""
+    ak_say ""
+    ak_say "== $_p"
+    # daftar repo proyek ini: bagian [repo] di projects/<PROJECT>.conf
+    _pc="$AK_TMP/$_p-init.conf"
+    if ! ak_fetch "projects/$_p.conf" "$_pc"; then
+      ak_warn "projects/$_p.conf tidak bisa diambil dari $( [ "$AK_SOURCE" = local ] && echo "$AK_DIR" || echo "$AK_BASE") (repo data privat? lihat opsi token, atau pakai --local)"
+      _failed="$_failed $_p"; continue
+    fi
+    _entries="$(ak_repo_entries "$_pc")"
+    _url="$(printf '%s\n' "$_entries" | awk -F'\t' '$1 == "." { print $2; exit }')"
+    if [ -z "$_url" ]; then ak_warn "tidak ada key root di [repo] projects/$_p.conf"; _failed="$_failed $_p"; continue; fi
+    ak_url_ok "$_url" "root $_p" || { _failed="$_failed $_p"; continue; }
+    _fresh=0; _pfail=0
+    ak_clone_into "$_url" "$AK_TARGET" "root"; _rc=$?
+    case "$_rc" in
+      0) _fresh=1 ;;
+      2) _gd="$(git -C "$AK_TARGET" rev-parse --absolute-git-dir 2>/dev/null)"
+         # Repo yang pernah dipasangi agent-kit untuk proyek ini tidak perlu lolos penanda modul lagi.
+         if [ -n "$_gd" ] && [ "$(sed -n 's/^project=//p' "$_gd/agent-kit/state" 2>/dev/null)" = "$_p" ]; then _fresh=1; fi ;;
+      *) _failed="$_failed $_p"; continue ;;
+    esac
+    # repo anak (modul, resources, tema, domain): key selain root di [repo]
+    if [ "$(printf '%s\n' "$_entries" | awk -F'\t' '$1 != "." && NF { n++ } END { print n + 0 }')" -gt 0 ]; then
+      _nc=0; _nf=0
+      while IFS="$(printf '\t')" read -r _path _curl; do
+        [ "$_path" = "." ] && continue
+        case "$_path" in
+          /*|*..*|*[!A-Za-z0-9._/-]*|'') ak_warn "path tidak valid di [repo] projects/$_p.conf: $_path"; _nf=$((_nf + 1)); continue ;;
+        esac
+        ak_url_ok "$_curl" "$_path" || { _nf=$((_nf + 1)); continue; }
+        if [ "$AK_DRY" = 1 ] && [ ! -d "$AK_TARGET" ]; then ak_say "  [simulasi] $_path: git clone $_curl -> $AK_TARGET/$_path"; _nc=$((_nc + 1)); continue; fi
+        ak_clone_into "$_curl" "$AK_TARGET/$_path" "$_path"; _crc=$?
+        case "$_crc" in 1) _nf=$((_nf + 1)) ;; *) _nc=$((_nc + 1)) ;; esac
+      done <<EOF
+$_entries
+EOF
+      ak_say "  repo anak: $_nc berhasil/ada, $_nf gagal"
+      [ "$_nf" -eq 0 ] || _pfail=1
+    else
+      ak_say "  tidak ada repo anak di [repo]; hanya repo root yang di-clone"
+    fi
+    if [ "$AK_DRY" = 1 ] && [ ! -d "$AK_TARGET/.git" ]; then
+      ak_say "  [simulasi] apply $_p"
+      if [ "$_pfail" = 1 ]; then _failed="$_failed $_p"; else _done="$_done $_p"; fi
+      continue
+    fi
+    AK_TARGET="$(cd "$AK_TARGET" && pwd -P)"
+    # apply di subshell: kegagalan satu proyek tidak menghentikan proyek lain
+    (
+      AK_TMP="$AK_TMP/apply-$_p"; mkdir -p "$AK_TMP"   # folder kerja terpisah: scratch/patch proyek lain tidak boleh terbawa
+      ak_resolve_project
+      [ "$_fresh" = 1 ] && AK_SKIP_IDENTIFY=1
+      ak_cmd_apply
+    )
+    _rc=$?
+    if [ "$_rc" -eq 0 ] && [ "$_pfail" -eq 0 ]; then _done="$_done $_p"; else _failed="$_failed $_p"; fi
+  done
+  ak_say ""
+  ak_say "Init selesai. Berhasil:${_done:- -}"
+  if [ -n "$_failed" ]; then ak_say "Gagal/dilewati:$_failed"; return 1; fi
+  return 0
+}
+
 # ----------------------------------------------------------------- verify & status
 ak_cmd_verify() {
   [ -n "$AK_CONF" ] || ak_load_conf
@@ -745,8 +891,9 @@ AgentKit Runner — distribusi berkas agent tanpa Git repo proyek
     | bash -s -- <GROUP> <PROJECT> <COMMAND> [opsi]
 
   GROUP   : nama konfigurasi config/<GROUP>.txt dari repo AgentKit-Run
-  PROJECT : nilai PROJECT yang terdaftar pada grup
+  PROJECT : nilai PROJECT yang terdaftar pada grup (untuk init boleh dikosongkan: ... <GROUP> init [PROJECT])
   COMMAND :
+    init    (tanpa PROJECT: seluruh grup) buat folder proyek di <root>, git clone root dan repo anak sesuai bagian [repo] di projects/<PROJECT>.conf, lalu apply
     build   bangun versi patch baru dari folder proyek ke data agentkit/.agent-kit/dist/<PROJECT>/ (otomatis vNNNN berikutnya)
     apply   terapkan patch dari versi terpasang (atau v0001) sampai versi terbaru
     verify  periksa berkas, hook git, blok exclude, git status, dan skill
@@ -763,7 +910,13 @@ EOF
 main() {
   AK_GROUP="${1:-}"; AK_PROJECT="${2:-}"; AK_COMMAND="${3:-}"
   case "$AK_GROUP" in ''|help|-h|--help) ak_usage; return 0 ;; esac
-  [ $# -ge 3 ] && shift 3 || shift $#
+  if [ "$AK_PROJECT" = init ]; then   # bentuk: <GROUP> init [PROJECT] [opsi]
+    AK_COMMAND=init
+    case "${3:-}" in ''|--*) AK_PROJECT=""; _n=2 ;; *) AK_PROJECT="$3"; _n=3 ;; esac
+    [ $# -ge $_n ] && shift $_n || shift $#
+  else
+    [ $# -ge 3 ] && shift 3 || shift $#
+  fi
   AK_ROOT=""; AK_TARGET=""; AK_DIR=""; AK_DRY=0; AK_OVERWRITE=0; AK_NOTE=""; AK_FORCE=0
   AK_SOURCE="${AGENTKIT_SOURCE:-remote}"; AK_BASE="${AGENTKIT_BASE_URL:-}"; AK_BRANCH="${AGENTKIT_BRANCH:-}"; AK_RUN_BASE="${AGENTKIT_RUN_URL:-$AK_DEFAULT_RUN_BASE}"
   AK_CONF=""; AK_GITDIR=""
@@ -782,23 +935,24 @@ main() {
       *) ak_die "opsi tidak dikenal: $1" ;;
     esac
   done
-  [ -n "$AK_PROJECT" ] || ak_die "PROJECT wajib diisi setelah GROUP"
+  [ -n "$AK_PROJECT" ] || [ "$AK_COMMAND" = init ] || ak_die "PROJECT wajib diisi setelah GROUP"
   command -v git >/dev/null 2>&1 || ak_die "git tidak ditemukan (dibutuhkan sebagai mesin patch)"
   AK_STAMP="$(date '+%Y%m%d-%H%M%S')"
   ak_mktemp
   AK_RUN_BASE="${AK_RUN_BASE%/}"
   ak_load_group
-  ak_resolve_project
+  [ -z "$AK_PROJECT" ] || ak_resolve_project
   [ "$AK_SOURCE" = local ] || command -v curl >/dev/null 2>&1 || ak_die "curl tidak ditemukan"
   ak_resolve_data_source
-  ak_resolve_paths
+  [ "$AK_COMMAND" = init ] || ak_resolve_paths
   case "$AK_COMMAND" in
+    init) ak_cmd_init ;;
     build) ak_cmd_build ;;
     apply) ak_cmd_apply ;;
     verify) ak_load_conf; ak_check_target; ak_cmd_verify ;;
     status) ak_cmd_status ;;
     help|'') ak_usage ;;
-    *) ak_die "COMMAND tidak dikenal: $AK_COMMAND (build|apply|verify|status|help)" ;;
+    *) ak_die "COMMAND tidak dikenal: $AK_COMMAND (init|build|apply|verify|status|help)" ;;
   esac
 }
 

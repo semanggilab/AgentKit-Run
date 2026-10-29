@@ -6,7 +6,8 @@ Pemakaian online (skrip dari repo publik agentkit-run):
 
   GROUP   : nama konfigurasi config/<GROUP>.txt
   PROJECT : salah satu proyek dalam konfigurasi grup
-  COMMAND : build | apply | verify | status | help
+  COMMAND : init | build | apply | verify | status | help
+          (init tanpa PROJECT: <GROUP> init [PROJECT] -> buat folder tiap proyek, git clone sesuai [repo] di projects/<PROJECT>.conf, lalu apply)
   Opsi    : sama dengan run.sh (--root, --target, --agentkit, --local, --base-url, --branch, --dry-run, --overwrite, --note, --force)
 
 Peluncur ini menjalankan run.sh memakai bash dari Git for Windows (Git Bash), WSL, atau bash sistem,
