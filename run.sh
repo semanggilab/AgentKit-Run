@@ -240,6 +240,19 @@ ak_token() {
   return 0
 }
 
+# Pesan diagnosis bila file data agent-kit tidak bisa diambil (dipakai init dan load_conf).
+ak_fetch_hint() {   # $1=path relatif di agentkit
+  if [ "$AK_SOURCE" = local ]; then
+    ak_warn "$1 tidak ditemukan di $AK_DIR"
+  elif [ -z "${AK_TOKEN:-}" ]; then
+    ak_warn "tidak bisa mengambil $AK_BASE/$1: tidak ada token GitLab, sedangkan repo data agent-kit privat."
+    ak_say "  Pilih salah satu: (1) login glab sekali: glab auth login; (2) export AGENTKIT_TOKEN=<PAT GitLab, read_repository untuk repo agentkit>;"
+    ak_say "  (3) simpan kredensial gitlab.com di git (Keychain/Git Credential Manager), atau (4) pakai --local bila folder agentkit ada di samping proyek."
+  else
+    ak_warn "tidak bisa mengambil $AK_BASE/$1 dengan token dari $AK_TOKEN_SRC (token kedaluwarsa atau tanpa akses read_repository ke repo agentkit?)"
+  fi
+}
+
 ak_load_conf() {
   AK_CONF="$AK_TMP/project.conf"
   if ! ak_fetch "projects/$AK_PROJECT.conf" "$AK_CONF"; then
@@ -754,7 +767,7 @@ ak_cmd_init() {
     # daftar repo proyek ini: bagian [repo] di projects/<PROJECT>.conf
     _pc="$AK_TMP/$_p-init.conf"
     if ! ak_fetch "projects/$_p.conf" "$_pc"; then
-      ak_warn "projects/$_p.conf tidak bisa diambil dari $( [ "$AK_SOURCE" = local ] && echo "$AK_DIR" || echo "$AK_BASE") (repo data privat? lihat opsi token, atau pakai --local)"
+      ak_fetch_hint "projects/$_p.conf"
       _failed="$_failed $_p"; continue
     fi
     _entries="$(ak_repo_entries "$_pc")"

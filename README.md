@@ -15,7 +15,7 @@ Setiap grup didefinisikan dalam `config/<GROUP>.txt`:
 - `BRANCH` — branch data opsional; bila kosong, branch default remote dideteksi
 - `PROJECT` — daftar proyek yang diizinkan, dipisahkan koma
 
-Contoh yang tersedia: `kaderkita` dan `webcore2`. Setiap proyek tetap mempunyai
+Contoh yang tersedia: `kaderkita` (Backend, CMS, Mobile, WebResult) dan `webcore2` (proyek `mpdn`, `pwskia`, dan `jnpk`). Setiap proyek tetap mempunyai
 konfigurasi dan riwayat patch sendiri dalam repo data kelompoknya.
 
 ## Menjalankan
