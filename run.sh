@@ -660,18 +660,18 @@ ak_apply_chain() {   # $1=terpasang, $2=terbaru, $3=dry
 }
 
 ak_apply_overwrite() {   # $1=terpasang, $2=terbaru, $3=dry
-  ak_reconstruct "$AK_TMP/latest" "$2"
-  ak_manifest "$AK_TMP/latest" > "$AK_TMP/latest.manifest"
+  ak_reconstruct "$AK_TMP/recon" "$2"
+  ak_manifest "$AK_TMP/recon" > "$AK_TMP/latest.manifest"
   cut -d' ' -f3- "$AK_TMP/latest.manifest" > "$AK_TMP/latest.paths"
   _c=0; _u=0; _s=0; _d=0
   while read -r _sha _x _f; do
     if [ ! -f "$AK_TARGET/$_f" ]; then _c=$((_c + 1))
-    elif cmp -s "$AK_TMP/latest/$_f" "$AK_TARGET/$_f" && { ak_is_windows || [ "$_x" = "$( [ -x "$AK_TARGET/$_f" ] && echo x || echo -)" ]; }; then
+    elif cmp -s "$AK_TMP/recon/$_f" "$AK_TARGET/$_f" && { ak_is_windows || [ "$_x" = "$( [ -x "$AK_TARGET/$_f" ] && echo x || echo -)" ]; }; then
       _s=$((_s + 1)); continue
     else _u=$((_u + 1)); [ "$3" = 1 ] || ak_backup "$_f"; fi
     if [ "$3" != 1 ]; then
       mkdir -p "$AK_TARGET/$(dirname "$_f")"
-      cp -p "$AK_TMP/latest/$_f" "$AK_TARGET/$_f"
+      cp -p "$AK_TMP/recon/$_f" "$AK_TARGET/$_f"
     fi
   done < "$AK_TMP/latest.manifest"
   if [ "$1" -gt 0 ] && ak_fetch ".agent-kit/dist/$AK_PROJECT/$(ak_vname "$1").manifest" "$AK_TMP/inst.manifest"; then
