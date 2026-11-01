@@ -77,10 +77,10 @@ key lain = path relatif terhadap root checkout (boleh diberi tanda kutip), nilai
 
 ```ini
 [repo]
-root = https://gitlab.com/webcore2/main-prod.git
-"modules/mpdn" = https://gitlab.com/webcore2/app-mpdn.git
-"resources" = https://gitlab.com/webcore/res-clipone.git
-"resources/dore" = https://gitlab.com/webcore/res-dore.git
+root = git@gitlab.com:webcore2/main-prod.git
+"modules/mpdn" = git@gitlab.com:webcore2/app-mpdn.git
+"resources" = git@gitlab.com:webcore/res-clipone.git
+"resources/dore" = git@gitlab.com:webcore/res-dore.git
 ```
 
 Induk di-clone lebih dulu dari anak (`resources` sebelum `resources/dore`, apa pun urutan barisnya). PATH yang
