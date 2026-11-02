@@ -29,7 +29,22 @@ bash AgentKit-Run/run.sh kaderkita CMS build --local --note "tambah skill X"
 ```
 
 Skrip menerima nama proyek dalam huruf besar atau kecil. Jalankan dari folder induk,
-dari folder proyek, atau berikan `--root`, `--target`, dan `--agentkit`.
+dari folder proyek, atau berikan `--root`, `--target`, dan `--agentkit`. Ketiga opsi
+lokasi menerima bentuk terpisah (`--root .`) maupun bentuk sama-dengan (`--root=.`).
+Target dapat berupa checkout Git atau workspace non-Git yang menyimpan berkas konteks
+agen di atas checkout proyek. Untuk workspace non-Git, state dan cadangan `--overwrite`
+disimpan di `<target>/.agent-kit/`; pemeriksaan hook, `info/exclude`, dan `git status`
+tidak dijalankan.
+
+Contoh workspace SDMK Kader dengan runner dan data agentkit di `tools/`, tetapi berkas
+agen di root workspace:
+
+```bash
+./tools/agentkit-run/run.sh sdmk-kader platform build --local --overwrite \
+  --root=./ --target=./ --agentkit=./tools/agentkit
+./tools/agentkit-run/run.sh sdmk-kader platform apply --local --overwrite \
+  --root=./ --target=./ --agentkit=./tools/agentkit
+```
 
 PowerShell (memerlukan Git Bash atau WSL2):
 

@@ -21,7 +21,7 @@
 #
 # Opsi:
 #   --root DIR       folder induk proyek dan repo data (default: dideteksi dari folder kerja)
-#   --target DIR     folder repo proyek tujuan (default: <root>/<PROJECT>)
+#   --target DIR     folder proyek atau workspace tujuan (default: <root>/<PROJECT>)
 #   --agentkit DIR   folder data agentkit lokal (default: <root>/agentkit)
 #   --local          apply/verify/status membaca data dari agentkit lokal, bukan unduhan
 #   --base-url URL   URL repo data (menggantikan BASE pada konfigurasi grup)
@@ -322,11 +322,21 @@ $C_IDENTIFY
 EOF
   fi
   [ -z "$_missing" ] || ak_die "$AK_TARGET tidak terlihat seperti repo $AK_PROJECT (tidak ada:$_missing)"
-  AK_GITDIR="$(git -C "$AK_TARGET" rev-parse --absolute-git-dir 2>/dev/null)" \
-    || ak_die "$AK_TARGET bukan repo Git"
-  _common="$(cd "$AK_TARGET" && git rev-parse --git-common-dir 2>/dev/null)"
-  AK_COMMON="$(cd "$AK_TARGET" && cd "$_common" && pwd -P)"
-  AK_STATE="$AK_GITDIR/agent-kit/state"
+  if AK_GITDIR="$(git -C "$AK_TARGET" rev-parse --absolute-git-dir 2>/dev/null)"; then
+    AK_HAS_GIT=1
+    _common="$(cd "$AK_TARGET" && git rev-parse --git-common-dir 2>/dev/null)"
+    AK_COMMON="$(cd "$AK_TARGET" && cd "$_common" && pwd -P)"
+    AK_STATE="$AK_GITDIR/agent-kit/state"
+    AK_BACKUP_DIR="$AK_GITDIR/agent-kit/backups"
+  else
+    # Workspace konteks agen dapat berada di atas checkout Git proyek. Simpan
+    # state dan cadangan lokal di sana; hook/exclude Git tidak relevan.
+    AK_HAS_GIT=0
+    AK_GITDIR=""
+    AK_COMMON=""
+    AK_STATE="$AK_TARGET/.agent-kit/state"
+    AK_BACKUP_DIR="$AK_TARGET/.agent-kit/backups"
+  fi
 }
 
 ak_installed_version() {
@@ -432,6 +442,7 @@ ak_reconstruct() {   # $1=folder kosong, $2=versi akhir; menerapkan v0001..$2
 
 # ----------------------------------------------------------------- .git/info/exclude
 ak_write_exclude_block() {   # $1=dry-run(0/1)
+  [ "$AK_HAS_GIT" = 1 ] || return 0
   _ex="$AK_COMMON/info/exclude"
   mkdir -p "$AK_COMMON/info"
   [ -f "$_ex" ] || : > "$_ex"
@@ -461,7 +472,7 @@ ak_post_install() {
     ak_say "  symlink skill: $( [ $_rc = 0 ] && echo OK || echo "kode $_rc")"
     printf '%s\n' "$_out" | sed 's/^/      /'
   fi
-  if [ -f "$AK_TARGET/.agents/install-git-hooks.sh" ]; then
+  if [ "$AK_HAS_GIT" = 1 ] && [ -f "$AK_TARGET/.agents/install-git-hooks.sh" ]; then
     _out="$(cd "$AK_TARGET" && bash .agents/install-git-hooks.sh --force 2>&1)"; _rc=$?
     ak_say "  hook git: $( [ $_rc = 0 ] && echo OK || echo "kode $_rc")"
     printf '%s\n' "$_out" | sed 's/^/      /'
@@ -470,7 +481,7 @@ ak_post_install() {
 
 ak_backup() {   # $1=path relatif
   [ -e "$AK_TARGET/$1" ] || return 0
-  _b="$AK_GITDIR/agent-kit/backups/$AK_STAMP/$1"
+  _b="$AK_BACKUP_DIR/$AK_STAMP/$1"
   mkdir -p "$(dirname "$_b")"
   cp -p "$AK_TARGET/$1" "$_b"
 }
@@ -631,7 +642,7 @@ ak_apply_chain() {   # $1=terpasang, $2=terbaru, $3=dry
       ak_say "  $_v TIDAK bisa diterapkan; tidak ada berkas yang diubah untuk versi ini:"
       printf '%s\n' "$_err" | sed 's/^/      /' | head -20
       ak_say "  Penyebab umum: berkas diubah lokal atau sudah ada sebelum pemasangan pertama."
-      ak_say "  Tinjau, lalu ulangi dengan --overwrite (berkas lokal dicadangkan di $AK_GITDIR/agent-kit/backups/)."
+      ak_say "  Tinjau, lalu ulangi dengan --overwrite (berkas lokal dicadangkan di $AK_BACKUP_DIR/)."
       [ "$3" = 1 ] || [ "$_i" -eq $(($1 + 1)) ] || ak_say "  Versi terpasang sekarang $(ak_vname $((_i - 1)))."
       return 1
     fi
@@ -761,7 +772,7 @@ ak_cmd_init() {
   ak_say "Init grup $AK_GROUP di $AK_ROOT$( [ "$AK_DRY" = 1 ] && echo ' [SIMULASI]')"
   _done=""; _failed=""
   for _p in $_list; do
-    AK_PROJECT="$_p"; AK_TARGET="$AK_ROOT/$_p"; AK_CONF=""; AK_GITDIR=""
+    AK_PROJECT="$_p"; AK_TARGET="$AK_ROOT/$_p"; AK_CONF=""; AK_GITDIR=""; AK_HAS_GIT=""; AK_BACKUP_DIR=""
     ak_say ""
     ak_say "== $_p"
     # daftar repo proyek ini: bagian [repo] di projects/<PROJECT>.conf
@@ -846,24 +857,28 @@ ak_cmd_verify() {
   done < "$AK_TMP/verify.manifest"
   if [ -z "$_bad" ]; then ak_say "  [OK] $_n berkas sesuai manifest $_v"; else _ok=0; ak_say "  [GAGAL] berkas tidak sesuai manifest $_v:$_bad"; fi
 
-  _hbad=""
-  for _h in "$AK_TARGET"/.agents/git-hooks/*; do
-    [ -f "$_h" ] || continue
-    _n2="$(basename "$_h")"
-    if [ ! -f "$AK_COMMON/hooks/$_n2" ] || ! cmp -s "$_h" "$AK_COMMON/hooks/$_n2"; then _hbad="$_hbad $_n2"; fi
-  done
-  if [ -z "$_hbad" ]; then ak_say "  [OK] hook git terpasang dan sama dengan .agents/git-hooks"; else _ok=0; ak_say "  [GAGAL] hook belum terpasang/berbeda:$_hbad"; fi
+  if [ "$AK_HAS_GIT" = 1 ]; then
+    _hbad=""
+    for _h in "$AK_TARGET"/.agents/git-hooks/*; do
+      [ -f "$_h" ] || continue
+      _n2="$(basename "$_h")"
+      if [ ! -f "$AK_COMMON/hooks/$_n2" ] || ! cmp -s "$_h" "$AK_COMMON/hooks/$_n2"; then _hbad="$_hbad $_n2"; fi
+    done
+    if [ -z "$_hbad" ]; then ak_say "  [OK] hook git terpasang dan sama dengan .agents/git-hooks"; else _ok=0; ak_say "  [GAGAL] hook belum terpasang/berbeda:$_hbad"; fi
 
-  if grep -q "^$AK_BLOCK_BEGIN" "$AK_COMMON/info/exclude" 2>/dev/null; then ak_say "  [OK] blok exclude agent-kit ada"
-  else _ok=0; ak_say "  [GAGAL] blok exclude agent-kit tidak ada"; fi
+    if grep -q "^$AK_BLOCK_BEGIN" "$AK_COMMON/info/exclude" 2>/dev/null; then ak_say "  [OK] blok exclude agent-kit ada"
+    else _ok=0; ak_say "  [GAGAL] blok exclude agent-kit tidak ada"; fi
 
-  _tops="$(cut -d' ' -f3- "$AK_TMP/verify.manifest" | cut -d/ -f1 | LC_ALL=C sort -u)"
-  _leak="$(git -C "$AK_TARGET" status --porcelain --untracked-files=all 2>/dev/null | cut -c4- | while IFS= read -r _p; do
-      _t="${_p%%/*}"; _t="${_t#\"}"
-      printf '%s\n' "$_tops" | grep -Fxq -- "$_t" && echo "$_p"
-    done)"
-  if [ -z "$_leak" ]; then ak_say "  [OK] berkas agent tidak muncul di git status"
-  else _ok=0; ak_say "  [GAGAL] berkas agent terlihat di git status:"; printf '%s\n' "$_leak" | head -10 | sed 's/^/        - /'; fi
+    _tops="$(cut -d' ' -f3- "$AK_TMP/verify.manifest" | cut -d/ -f1 | LC_ALL=C sort -u)"
+    _leak="$(git -C "$AK_TARGET" status --porcelain --untracked-files=all 2>/dev/null | cut -c4- | while IFS= read -r _p; do
+        _t="${_p%%/*}"; _t="${_t#\"}"
+        printf '%s\n' "$_tops" | grep -Fxq -- "$_t" && echo "$_p"
+      done)"
+    if [ -z "$_leak" ]; then ak_say "  [OK] berkas agent tidak muncul di git status"
+    else _ok=0; ak_say "  [GAGAL] berkas agent terlihat di git status:"; printf '%s\n' "$_leak" | head -10 | sed 's/^/        - /'; fi
+  else
+    ak_say "  [LEWATI] target bukan repo Git; hook, blok exclude, dan git status tidak relevan"
+  fi
 
   _sbad=""
   for _s in "$AK_TARGET"/.agents/skills/*/SKILL.md; do
@@ -909,11 +924,12 @@ AgentKit Runner — distribusi berkas agent tanpa Git repo proyek
     init    (tanpa PROJECT: seluruh grup) buat folder proyek di <root>, git clone root dan repo anak sesuai bagian [repo] di projects/<PROJECT>.conf, lalu apply
     build   bangun versi patch baru dari folder proyek ke data agentkit/.agent-kit/dist/<PROJECT>/ (otomatis vNNNN berikutnya)
     apply   terapkan patch dari versi terpasang (atau v0001) sampai versi terbaru
-    verify  periksa berkas, hook git, blok exclude, git status, dan skill
+    verify  periksa berkas dan skill; target Git juga diperiksa hook, exclude, dan status-nya
     status  tampilkan versi terpasang dan versi terbaru
     help    bantuan ini
 
-  Opsi: --root DIR --target DIR --agentkit DIR --local --base-url URL --branch NAME --dry-run --overwrite --note TEKS --force
+  Opsi: --root DIR (--root=DIR) --target DIR (--target=DIR) --agentkit DIR (--agentkit=DIR)
+        --local --base-url URL --branch NAME --dry-run --overwrite --note TEKS --force
   Konfigurasi grup dimuat dari AgentKit-Run/config/<GROUP>.txt. Data patch memakai BASE + BRANCH;
   token dicari otomatis sesuai host sumber. Lokal (pemelihara): bash agentkit-run/run.sh <GROUP> <PROJECT> <COMMAND> --local
 EOF
@@ -932,12 +948,15 @@ main() {
   fi
   AK_ROOT=""; AK_TARGET=""; AK_DIR=""; AK_DRY=0; AK_OVERWRITE=0; AK_NOTE=""; AK_FORCE=0
   AK_SOURCE="${AGENTKIT_SOURCE:-remote}"; AK_BASE="${AGENTKIT_BASE_URL:-}"; AK_BRANCH="${AGENTKIT_BRANCH:-}"; AK_RUN_BASE="${AGENTKIT_RUN_URL:-$AK_DEFAULT_RUN_BASE}"
-  AK_CONF=""; AK_GITDIR=""
+  AK_CONF=""; AK_GITDIR=""; AK_HAS_GIT=""; AK_BACKUP_DIR=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --root) AK_ROOT="$2"; shift 2 ;;
+      --root=*) AK_ROOT="${1#*=}"; shift ;;
       --target) AK_TARGET="$2"; shift 2 ;;
+      --target=*) AK_TARGET="${1#*=}"; shift ;;
       --agentkit) AK_DIR="$2"; shift 2 ;;
+      --agentkit=*) AK_DIR="${1#*=}"; shift ;;
       --local) AK_SOURCE=local; shift ;;
       --base-url) AK_BASE="$2"; shift 2 ;;
       --branch) AK_BRANCH="$2"; shift 2 ;;
